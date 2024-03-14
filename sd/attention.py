@@ -54,7 +54,7 @@ class SelfAttention(nn.Module):
 
         # (Batch_Size, H, Seq_Len, Dim / H) -> (Batch_Size, Seq_Len, H, Dim / H)
         output = output.transpose(1, 2) 
-
+ 
         # (Batch_Size, Seq_Len, H, Dim / H) -> (Batch_Size, Seq_Len, Dim)
         output = output.reshape(input_shape) 
 

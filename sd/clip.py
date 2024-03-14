@@ -72,6 +72,8 @@ class CLIPLayer(nn.Module):
 class CLIP(nn.Module):
     def __init__(self):
         super().__init__()
+        # convert sequence text to list of numbers (where each number indicates the position of the token into the vocab)
+        # and then convert into embeddings (each vector is 768 dimensional). The context length is 77 (max sequence length)
         self.embedding = CLIPEmbedding(49408, 768, 77)
 
         self.layers = nn.ModuleList([
@@ -81,8 +83,10 @@ class CLIP(nn.Module):
         self.layernorm = nn.LayerNorm(768)
     
     def forward(self, tokens: torch.LongTensor) -> torch.FloatTensor:
+        # position of each token into vocab
         tokens = tokens.type(torch.long)
         
+        # convert each token index to embeddings
         # (Batch_Size, Seq_Len) -> (Batch_Size, Seq_Len, Dim)
         state = self.embedding(tokens)
 

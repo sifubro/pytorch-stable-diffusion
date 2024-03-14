@@ -7,9 +7,11 @@ class VAE_Encoder(nn.Sequential):
     def __init__(self):
         super().__init__(
             # (Batch_Size, Channel, Height, Width) -> (Batch_Size, 128, Height, Width)
+            # from 3 to 128 channels
             nn.Conv2d(3, 128, kernel_size=3, padding=1),
             
-             # (Batch_Size, 128, Height, Width) -> (Batch_Size, 128, Height, Width)
+            # (Batch_Size, 128, Height, Width) -> (Batch_Size, 128, Height, Width)
+            # doesn't change size of image. from 128 to 128 channels
             VAE_ResidualBlock(128, 128),
             
             # (Batch_Size, 128, Height, Width) -> (Batch_Size, 128, Height, Width)
@@ -45,7 +47,8 @@ class VAE_Encoder(nn.Sequential):
             # (Batch_Size, 512, Height / 8, Width / 8) -> (Batch_Size, 512, Height / 8, Width / 8)
             VAE_ResidualBlock(512, 512), 
             
-            # (Batch_Size, 512, Height / 8, Width / 8) -> (Batch_Size, 512, Height / 8, Width / 8)
+            # (Batch_Size, 512, Height / 8, Width / 8) -> (Batch_Size, 512, Height / 8, Width / 8) 
+            # SELF ATTENTION
             VAE_AttentionBlock(512), 
             
             # (Batch_Size, 512, Height / 8, Width / 8) -> (Batch_Size, 512, Height / 8, Width / 8)
@@ -71,23 +74,28 @@ class VAE_Encoder(nn.Sequential):
 
     def forward(self, x, noise):
         # x: (Batch_Size, Channel, Height, Width)
-        # noise: (Batch_Size, 4, Height / 8, Width / 8)
+        # noise: (Batch_Size, 4, Height / 8, Width / 8)  --> Has the same size as the output of the encoder
 
         for module in self:
 
+            # for the modules: nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=0) with stride = 2
             if getattr(module, 'stride', None) == (2, 2):  # Padding at downsampling should be asymmetric (see #8)
                 # Pad: (Padding_Left, Padding_Right, Padding_Top, Padding_Bottom).
                 # Pad with zeros on the right and bottom.
                 # (Batch_Size, Channel, Height, Width) -> (Batch_Size, Channel, Height + Padding_Top + Padding_Bottom, Width + Padding_Left + Padding_Right) = (Batch_Size, Channel, Height + 1, Width + 1)
-                x = F.pad(x, (0, 1, 0, 1))
+                x = F.pad(x, (0, 1, 0, 1))  # add a layer of pixels on the right and bottom side of the image only
             
-            x = module(x)
+            x = module(x)  # Compressed version of the image x8 times
+
+        # We are learning a latent space --> return mu and logvariance 
+
         # (Batch_Size, 8, Height / 8, Width / 8) -> two tensors of shape (Batch_Size, 4, Height / 8, Width / 8)
         mean, log_variance = torch.chunk(x, 2, dim=1)
         # Clamp the log variance between -30 and 20, so that the variance is between (circa) 1e-14 and 1e8. 
         # (Batch_Size, 4, Height / 8, Width / 8) -> (Batch_Size, 4, Height / 8, Width / 8)
         log_variance = torch.clamp(log_variance, -30, 20)
         # (Batch_Size, 4, Height / 8, Width / 8) -> (Batch_Size, 4, Height / 8, Width / 8)
+        # transform log variance to variance by exponentiation
         variance = log_variance.exp()
         # (Batch_Size, 4, Height / 8, Width / 8) -> (Batch_Size, 4, Height / 8, Width / 8)
         stdev = variance.sqrt()
