@@ -19,6 +19,9 @@ class CLIPEmbedding(nn.Module):
         
         return x
 
+
+
+
 class CLIPLayer(nn.Module):
     def __init__(self, n_head: int, n_embd: int):
         super().__init__()
@@ -68,6 +71,9 @@ class CLIPLayer(nn.Module):
         x += residue
 
         return x
+
+
+
 
 class CLIP(nn.Module):
     def __init__(self):

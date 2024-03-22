@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from attention import SelfAttention, CrossAttention
 
-class TimeEmbedding(nn.Module):
+class TimeEmbedding(nn.Module): # encodes information about the timestep of the denoising process that we are atm
     def __init__(self, n_embd):
         super().__init__()
         self.linear_1 = nn.Linear(n_embd, 4 * n_embd)
@@ -21,6 +21,7 @@ class TimeEmbedding(nn.Module):
         # (1, 1280) -> (1, 1280)
         x = self.linear_2(x)
 
+        # (1, 1280)
         return x
 
 class UNET_ResidualBlock(nn.Module):
@@ -74,6 +75,18 @@ class UNET_ResidualBlock(nn.Module):
         
         # (Batch_Size, Out_Channels, Height, Width) + (Batch_Size, Out_Channels, Height, Width) -> (Batch_Size, Out_Channels, Height, Width)
         return merged + self.residual_layer(residue)
+
+# https://github.com/CompVis/stable-diffusion/blob/21f890f9da3cfbeaba8e2ac3c425ee9e998d5229/ldm/modules/attention.py#L37C10-L37C10
+# feedforward
+class GEGLU(nn.Module):
+    def __init__(self, dim_in, dim_out):
+        super().__init__()
+        self.proj = nn.Linear(dim_in, dim_out * 2)
+
+    def forward(self, x):
+        x, gate = self.proj(x).chunk(2, dim=-1)
+        return x * F.gelu(gate)
+
 
 class UNET_AttentionBlock(nn.Module):
     def __init__(self, n_head: int, n_embd: int, d_context=768):
@@ -135,7 +148,7 @@ class UNET_AttentionBlock(nn.Module):
         # (Batch_Size, Height * Width, Features) -> (Batch_Size, Height * Width, Features)
         x = self.layernorm_2(x)
         
-        # (Batch_Size, Height * Width, Features) -> (Batch_Size, Height * Width, Features)
+        # (Batch_Size, Height * Width, Features) -> (Batch_Size, Height * Width, Features) = (B, 4096, 320)
         x = self.attention_2(x, context)
         
         # (Batch_Size, Height * Width, Features) + (Batch_Size, Height * Width, Features) -> (Batch_Size, Height * Width, Features)
@@ -152,11 +165,12 @@ class UNET_AttentionBlock(nn.Module):
         # GeGLU as implemented in the original code: https://github.com/CompVis/stable-diffusion/blob/21f890f9da3cfbeaba8e2ac3c425ee9e998d5229/ldm/modules/attention.py#L37C10-L37C10
         # (Batch_Size, Height * Width, Features) -> two tensors of shape (Batch_Size, Height * Width, Features * 4)
         x, gate = self.linear_geglu_1(x).chunk(2, dim=-1) 
+        # x -> (B, 4096, 1280) and gate ->  (B, 4096, 1280) 
         
         # Element-wise product: (Batch_Size, Height * Width, Features * 4) * (Batch_Size, Height * Width, Features * 4) -> (Batch_Size, Height * Width, Features * 4)
         x = x * F.gelu(gate)
         
-        # (Batch_Size, Height * Width, Features * 4) -> (Batch_Size, Height * Width, Features)
+        # (Batch_Size, Height * Width, Features   * 4) -> (Batch_Size, Height * Width, Features)
         x = self.linear_geglu_2(x)
         
         # (Batch_Size, Height * Width, Features) + (Batch_Size, Height * Width, Features) -> (Batch_Size, Height * Width, Features)
@@ -186,6 +200,7 @@ class SwitchSequential(nn.Sequential):
     def forward(self, x, context, time):
         for layer in self:
             if isinstance(layer, UNET_AttentionBlock):
+                # CROSS ATTENTION between our latents and the prompt
                 x = layer(x, context)
             elif isinstance(layer, UNET_ResidualBlock):
                 x = layer(x, time)
@@ -233,17 +248,31 @@ class UNET(nn.Module):
             # (Batch_Size, 1280, Height / 64, Width / 64) -> (Batch_Size, 1280, Height / 64, Width / 64)
             SwitchSequential(UNET_ResidualBlock(1280, 1280)),
         ])
+        # input of self.encoders is  
+        #   - latent z would be (B, 4, 64, 64)
+        #   - context of size (B, 77, 768)
+        #   - time of shape (1, 1280)
+        # output of encoders will be (B, 1280, 8, 8)
+
 
         self.bottleneck = SwitchSequential(
             # (Batch_Size, 1280, Height / 64, Width / 64) -> (Batch_Size, 1280, Height / 64, Width / 64)
             UNET_ResidualBlock(1280, 1280), 
             
+            # CROSS ATTENTION
             # (Batch_Size, 1280, Height / 64, Width / 64) -> (Batch_Size, 1280, Height / 64, Width / 64)
             UNET_AttentionBlock(8, 160), 
             
             # (Batch_Size, 1280, Height / 64, Width / 64) -> (Batch_Size, 1280, Height / 64, Width / 64)
             UNET_ResidualBlock(1280, 1280), 
         )
+        # input of self.encoders is  
+        #   - latent x would be (B, 1280, 8, 8) for encoder size
+        #   - context of size (B, 77, 768)
+        #   - time of shape (1, 1280)
+        # output of bottleneck will be (B, 1280, 8, 8)
+
+
         
         self.decoders = nn.ModuleList([
             # (Batch_Size, 2560, Height / 64, Width / 64) -> (Batch_Size, 1280, Height / 64, Width / 64)
@@ -327,23 +356,29 @@ class UNET_OutputLayer(nn.Module):
 class Diffusion(nn.Module):
     def __init__(self):
         super().__init__()
+        # timestemp that the image latent Z was noisyfied
         self.time_embedding = TimeEmbedding(320)
         self.unet = UNET()
         self.final = UNET_OutputLayer(320, 4)
     
     def forward(self, latent, context, time):
-        # latent: (Batch_Size, 4, Height / 8, Width / 8)
-        # context: (Batch_Size, Seq_Len, Dim)
-        # time: (1, 320)
+        # latent: (Batch_Size, 4, Height / 8, Width / 8) --> latent Z Output of Encoder in VAE
+        # context: (Batch_Size, Seq_Len, Dim) = (B, 77, 768)  --> Text prompt to condition on (converted from CLIP encoder)
+        # time: (1, 320)  --> timestemp that the image latent Z was noisyfied. Tells the model at which time we arrived in the denoisification
 
+        # Convert time into an embedding
         # (1, 320) -> (1, 1280)
         time = self.time_embedding(time)
         
+        # UNET will convert our latent Z into another latent Z'
         # (Batch, 4, Height / 8, Width / 8) -> (Batch, 320, Height / 8, Width / 8)
         output = self.unet(latent, context, time)
         
+        # go back to the original size of features 320 -> 4 
+        # GOAL is to predict how much noise was added. Then remove noise and repeat through UNET
         # (Batch, 320, Height / 8, Width / 8) -> (Batch, 4, Height / 8, Width / 8)
         output = self.final(output)
         
+        # This is the latent Z'
         # (Batch, 4, Height / 8, Width / 8)
         return output

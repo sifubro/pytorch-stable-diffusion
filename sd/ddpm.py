@@ -4,25 +4,32 @@ import numpy as np
 class DDPMSampler:
 
     def __init__(self, generator: torch.Generator, num_training_steps=1000, beta_start: float = 0.00085, beta_end: float = 0.0120):
+        # beta_end will turn image into complete noise
         # Params "beta_start" and "beta_end" taken from: https://github.com/CompVis/stable-diffusion/blob/21f890f9da3cfbeaba8e2ac3c425ee9e998d5229/configs/stable-diffusion/v1-inference.yaml#L5C8-L5C8
         # For the naming conventions, refer to the DDPM paper (https://arxiv.org/pdf/2006.11239.pdf)
+        # 1000 numbers, num_training_steps how many pieces we want to divide the linear space between beta_start and beta_end
         self.betas = torch.linspace(beta_start ** 0.5, beta_end ** 0.5, num_training_steps, dtype=torch.float32) ** 2
         self.alphas = 1.0 - self.betas
-        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0) # [a0, a0*a1, a0*a1*a2, ...]
         self.one = torch.tensor(1.0)
-
+ 
         self.generator = generator
 
         self.num_train_timesteps = num_training_steps
+        #  From more noisy 1000 to less noisy 0
+        # go from 999 to 0 in timestemps because we want to reverse the noise (and 1000 is the only noise)
         self.timesteps = torch.from_numpy(np.arange(0, num_training_steps)[::-1].copy())
 
     def set_inference_timesteps(self, num_inference_steps=50):
         self.num_inference_steps = num_inference_steps
-        step_ratio = self.num_train_timesteps // self.num_inference_steps
+        step_ratio = self.num_train_timesteps // self.num_inference_steps # 20
+        # 999, 999-20, 999-40, ... , 0  = 50 steps
         timesteps = (np.arange(0, num_inference_steps) * step_ratio).round()[::-1].copy().astype(np.int64)
         self.timesteps = torch.from_numpy(timesteps)
 
     def _get_previous_timestep(self, timestep: int) -> int:
+        # timestemp - step_ratio
+        # 999 -> 999-20, 979 -> 979 -20 etc
         prev_t = timestep - self.num_train_timesteps // self.num_inference_steps
         return prev_t
     
@@ -51,12 +58,17 @@ class DDPMSampler:
         """
         # start_step is the number of noise levels to skip
         start_step = self.num_inference_steps - int(self.num_inference_steps * strength)
-        self.timesteps = self.timesteps[start_step:]
+        self.timesteps = self.timesteps[start_step:]  # skip some timesteps
         self.start_step = start_step
 
     def step(self, timestep: int, latents: torch.Tensor, model_output: torch.Tensor):
+        # Go from more noisy to less noisy
+        # timestep at which the noise was added (or we think it was added)
+        # for the reverse process we can skip steps. What it the timestemp at which it shoudl remove the noise
+        # latents x_t = Z (1, 4, 64, 64)
+        # model_output = predicted noise from UNET e_theta(x_t, t) at timestemp t
         t = timestep
-        prev_t = self._get_previous_timestep(t)
+        prev_t = self._get_previous_timestep(t) # given 999 it will return 999-20 (get previous step of the denoising)
 
         # 1. compute alphas, betas
         alpha_prod_t = self.alphas_cumprod[t]
@@ -81,7 +93,7 @@ class DDPMSampler:
 
         # 6. Add noise
         variance = 0
-        if t > 0:
+        if t > 0: # Only add noise if not in the last timestep.
             device = model_output.device
             noise = torch.randn(model_output.shape, generator=self.generator, device=device, dtype=model_output.dtype)
             # Compute the variance as per formula (7) from https://arxiv.org/pdf/2006.11239.pdf
@@ -93,10 +105,11 @@ class DDPMSampler:
 
         return pred_prev_sample
     
+    # add noise to the latent (1, 4, 64, 64) of the image
     def add_noise(
         self,
         original_samples: torch.FloatTensor,
-        timesteps: torch.IntTensor,
+        timesteps: torch.IntTensor,  # 1000 will be complete noise
     ) -> torch.FloatTensor:
         alphas_cumprod = self.alphas_cumprod.to(device=original_samples.device, dtype=original_samples.dtype)
         timesteps = timesteps.to(original_samples.device)
@@ -104,8 +117,10 @@ class DDPMSampler:
         sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
         sqrt_alpha_prod = sqrt_alpha_prod.flatten()
         while len(sqrt_alpha_prod.shape) < len(original_samples.shape):
+            # keep unsqueezing until you reach same number of dimensions
             sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
 
+        # get standard deviation (square root of variance)
         sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
         sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
         while len(sqrt_one_minus_alpha_prod.shape) < len(original_samples.shape):
@@ -114,6 +129,8 @@ class DDPMSampler:
         # Sample from q(x_t | x_0) as in equation (4) of https://arxiv.org/pdf/2006.11239.pdf
         # Because N(mu, sigma) = X can be obtained by X = mu + sigma * N(0, 1)
         # here mu = sqrt_alpha_prod * original_samples and sigma = sqrt_one_minus_alpha_prod
+            
+        # Sample noise from N(0,1)
         noise = torch.randn(original_samples.shape, generator=self.generator, device=original_samples.device, dtype=original_samples.dtype)
         noisy_samples = sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
         return noisy_samples

@@ -75,26 +75,28 @@ class CrossAttention(nn.Module):
         self.d_head = d_embed // n_heads
     
     def forward(self, x, y):
-        # x (latent): # (Batch_Size, Seq_Len_Q, Dim_Q)
+        # assume input image H, W = 512, 512
+        # x (latent): # (Batch_Size, Seq_Len_Q, Dim_Q) = (B, H*W/64=4096, 320)
         # y (context): # (Batch_Size, Seq_Len_KV, Dim_KV) = (Batch_Size, 77, 768)
 
         input_shape = x.shape
         batch_size, sequence_length, d_embed = input_shape
         # Divide each embedding of Q into multiple heads such that d_heads * n_heads = Dim_Q
+        # (B, H*W/64=4096, 8, 40)
         interim_shape = (batch_size, -1, self.n_heads, self.d_head)
         
-        # (Batch_Size, Seq_Len_Q, Dim_Q) -> (Batch_Size, Seq_Len_Q, Dim_Q)
+        # (Batch_Size, Seq_Len_Q, Dim_Q) -> (Batch_Size, Seq_Len_Q, Dim_Q) = (B, 4096, 320)
         q = self.q_proj(x)
-        # (Batch_Size, Seq_Len_KV, Dim_KV) -> (Batch_Size, Seq_Len_KV, Dim_Q)
+        # (Batch_Size, Seq_Len_KV, Dim_KV) -> (Batch_Size, Seq_Len_KV, Dim_Q) = (B, 77, 320)
         k = self.k_proj(y)
-        # (Batch_Size, Seq_Len_KV, Dim_KV) -> (Batch_Size, Seq_Len_KV, Dim_Q)
+        # (Batch_Size, Seq_Len_KV, Dim_KV) -> (Batch_Size, Seq_Len_KV, Dim_Q) = (B, 77, 320)
         v = self.v_proj(y)
 
-        # (Batch_Size, Seq_Len_Q, Dim_Q) -> (Batch_Size, Seq_Len_Q, H, Dim_Q / H) -> (Batch_Size, H, Seq_Len_Q, Dim_Q / H)
+        # (Batch_Size, Seq_Len_Q, Dim_Q) -> (Batch_Size, Seq_Len_Q, H, Dim_Q / H) -> (Batch_Size, H, Seq_Len_Q, Dim_Q / H) = (B, 8, 4096, 40)
         q = q.view(interim_shape).transpose(1, 2) 
-        # (Batch_Size, Seq_Len_KV, Dim_Q) -> (Batch_Size, Seq_Len_KV, H, Dim_Q / H) -> (Batch_Size, H, Seq_Len_KV, Dim_Q / H)
+        # (Batch_Size, Seq_Len_KV, Dim_Q) -> (Batch_Size, Seq_Len_KV, H, Dim_Q / H) -> (Batch_Size, H, Seq_Len_KV, Dim_Q / H) = (B, 8, 77, 40)
         k = k.view(interim_shape).transpose(1, 2) 
-        # (Batch_Size, Seq_Len_KV, Dim_Q) -> (Batch_Size, Seq_Len_KV, H, Dim_Q / H) -> (Batch_Size, H, Seq_Len_KV, Dim_Q / H)
+        # (Batch_Size, Seq_Len_KV, Dim_Q) -> (Batch_Size, Seq_Len_KV, H, Dim_Q / H) -> (Batch_Size, H, Seq_Len_KV, Dim_Q / H) = (B, 8, 77, 40)
         v = v.view(interim_shape).transpose(1, 2) 
         
         # (Batch_Size, H, Seq_Len_Q, Dim_Q / H) @ (Batch_Size, H, Dim_Q / H, Seq_Len_KV) -> (Batch_Size, H, Seq_Len_Q, Seq_Len_KV)

@@ -108,5 +108,5 @@ class VAE_Encoder(nn.Sequential):
         # Constant taken from: https://github.com/CompVis/stable-diffusion/blob/21f890f9da3cfbeaba8e2ac3c425ee9e998d5229/configs/stable-diffusion/v1-inference.yaml#L17C1-L17C1
         x *= 0.18215
         
-        return x
+        return x  # (Batch_Size, 4, Height / 8, Width / 8) = (B, 4, 64, 64)
 
